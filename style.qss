@@ -1,0 +1,117 @@
+QWidget {
+    background-color: #2E3440;
+    color: #ECEFF4;
+    font-family: Segoe UI, Arial, sans-serif;
+    font-size: 10pt;
+}
+
+QMainWindow {
+    border: 1px solid #4C566A;
+}
+
+QLineEdit, QComboBox {
+    background-color: #3B4252;
+    border: 1px solid #4C566A;
+    border-radius: 4px;
+    padding: 4px 8px;
+    selection-background-color: #81A1C1;
+}
+QLineEdit:focus, QComboBox:focus {
+    border: 1px solid #88C0D0;
+}
+
+QComboBox::drop-down {
+    border: none;
+}
+
+QComboBox::down-arrow {
+    image: url(down_arrow.png); /* Considere criar um ícone de seta ou usar um do Qt */
+}
+
+QPushButton {
+    background-color: #4C566A;
+    color: #ECEFF4;
+    border: none;
+    padding: 8px 16px;
+    border-radius: 4px;
+    font-weight: bold;
+}
+QPushButton:hover {
+    background-color: #5E81AC;
+}
+QPushButton:pressed {
+    background-color: #81A1C1;
+}
+QPushButton:disabled {
+    background-color: #3B4252;
+    color: #4C566A;
+}
+
+QPushButton#startButton {
+    background-color: #A3BE8C;
+    color: #2E3440;
+}
+QPushButton#startButton:hover {
+    background-color: #B4D5A1;
+}
+QPushButton#stopButton {
+    background-color: #BF616A;
+    color: #2E3440;
+}
+QPushButton#stopButton:hover {
+    background-color: #D08770;
+}
+
+QTableWidget {
+    background-color: #3B4252;
+    border: 1px solid #4C566A;
+    border-radius: 4px;
+    outline: 0px;
+    gridline-color: #434C5E;
+}
+QTableWidget::item {
+    padding-left: 8px;
+    border: none;
+}
+QTableWidget::item:selected {
+    background-color: #88C0D0;
+    color: #2E3440;
+}
+QTableWidget {
+    alternate-background-color: #434C5E;
+}
+QHeaderView::section {
+    background-color: #4C566A;
+    color: #ECEFF4;
+    padding: 4px;
+    border: 1px solid #2E3440;
+    font-weight: bold;
+}
+
+QScrollBar:vertical {
+    border: none;
+    background: #3B4252;
+    width: 10px;
+    margin: 0px 0px 0px 0px;
+}
+QScrollBar::handle:vertical {
+    background: #4C566A;
+    min-height: 20px;
+    border-radius: 5px;
+}
+QScrollBar::handle:vertical:hover {
+    background: #5E81AC;
+}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+    height: 0px;
+}
+
+QMessageBox, QDialog {
+    background-color: #3B4252;
+}
+QMessageBox QLabel, QDialog QLabel, QCheckBox {
+    color: #ECEFF4;
+}
+QMessageBox QPushButton, QDialog QPushButton {
+    min-width: 80px;
+}

@@ -1,0 +1,13 @@
+# --- Framework de IA (Instalação Universal) ---
+# CORREÇÃO AQUI: Trocado --index-url por --extra-index-url
+--extra-index-url https://download.pytorch.org/whl/cu121
+torch==2.3.1
+torchvision==0.18.1
+
+# --- Pacotes Principais do Projeto ---
+PySide6==6.6.0
+opencv-python==4.9.0.80
+requests==2.31.0
+ultralytics==8.1.27
+easyocr==1.7.1
+numpy==1.26.4
