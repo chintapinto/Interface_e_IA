@@ -1,0 +1,22 @@
+{
+    "C\u00e2mera Gitel": {
+        "exact_number": false,
+        "mode": "object",
+        "object_ids": "2",
+        "quantity": 1,
+        "rearm_time": 20,
+        "sensitivity": 5,
+        "url": "rtsp://NOC:G1t3L@192.168.200.250:554/Interface/Cameras/Media?Camera=011&Profile=Custom&CustomProfile=Visualizacao",
+        "use_gpu": false
+    },
+    "Webcam": {
+        "url": "0",
+        "rearm_time": 5,
+        "mode": "object",
+        "object_ids": "0",
+        "quantity": 1,
+        "exact_number": false,
+        "sensitivity": 5,
+        "use_gpu": false
+    }
+}
