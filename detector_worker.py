@@ -23,6 +23,17 @@ def send_alert(cam_name, message):
     print(json.dumps(log_data), flush=True)
 
 
+def send_detection_data(cam_name, detections, roi=None, offset=(0, 0)):
+    detection_payload = {
+        "type": "detection",
+        "camera": cam_name,
+        "detections": detections,
+        "roi": roi,
+        "offset": offset
+    }
+    print(json.dumps(detection_payload), flush=True)
+
+
 try:
     from ultralytics import YOLO
 
@@ -45,20 +56,8 @@ YOLO_CLASSES = {0: 'pessoa', 1: 'bicicleta', 2: 'carro', 3: 'motocicleta', 4: 'a
                 77: 'ursinho de pelúcia', 78: 'secador de cabelo', 79: 'escova de dentes'}
 
 
-def yolo_draw_info(frame, detections, target_ids):
-    for det in detections:
-        x1, y1, x2, y2, conf, cls_id = det
-        if int(cls_id) in target_ids:
-            label = f"{YOLO_CLASSES.get(int(cls_id), f'ID:{int(cls_id)}')}: {conf:.2f}"
-            color = (0, 255, 0)
-            cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), color, 2)
-            cv2.putText(frame, label, (int(x1), int(y1) - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
-
-    cv2.putText(frame, "Pressione 'Q' para sair", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-    return frame
-
-
-def start_yolo_monitoring(cam_name, video_url, object_ids_str, device, rearm_time, quantity, exact_number, sensitivity):
+def start_yolo_monitoring(cam_name, video_url, object_ids_str, device, rearm_time, quantity, exact_number, sensitivity,
+                          roi=None):
     if device != 'cpu' and not torch.cuda.is_available():
         print(f"AVISO: GPU solicitada (device='{device}'), mas não disponível. Usando CPU como alternativa.",
               flush=True)
@@ -85,7 +84,6 @@ def start_yolo_monitoring(cam_name, video_url, object_ids_str, device, rearm_tim
         report_error(cam_name, f"Não foi possível conectar à câmera: {video_url}")
         return
 
-    window_name = f"YOLO - {cam_name}"
     last_alert_time = 0
     condition_start_time = 0
     is_condition_active = False
@@ -96,13 +94,22 @@ def start_yolo_monitoring(cam_name, video_url, object_ids_str, device, rearm_tim
             report_error(cam_name, "Sinal de vídeo perdido.")
             break
 
+        frame_to_process = frame
+        offset_x, offset_y = 0, 0
+        if roi:
+            y1, y2, x1, x2 = roi
+            frame_to_process = frame[y1:y2, x1:x2]
+            offset_x, offset_y = x1, y1
+
         try:
-            results = model(frame, classes=target_ids, conf=0.5, verbose=False, device=device)
+            results = model(frame_to_process, classes=target_ids, conf=0.5, verbose=False, device=device)
             detections = results[0].boxes.data.tolist() if results[0].boxes else []
         except Exception as e:
             report_error(cam_name, f"Erro durante a inferência do modelo YOLO: {e}")
             time.sleep(1)
             continue
+
+        send_detection_data(cam_name, detections, roi, (offset_x, offset_y))
 
         detection_count = len(detections)
         quantity_condition_met = (detection_count == quantity) if exact_number else (detection_count >= quantity)
@@ -123,15 +130,15 @@ def start_yolo_monitoring(cam_name, video_url, object_ids_str, device, rearm_tim
             is_condition_active = False
             condition_start_time = 0
 
-        final_frame = yolo_draw_info(frame.copy(), detections, target_ids)
-        cv2.imshow(window_name, final_frame)
-
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
+        time.sleep(1 / 30)  # Simula o processamento para não sobrecarregar
 
     cap.release()
-    cv2.destroyAllWindows()
 
+
+# (O resto do arquivo permanece o mesmo, incluindo o código de OCR e o __main__)
+# ...
+# (O código de OCR e o __main__ permanecem inalterados)
+# ...
 
 try:
     import easyocr
@@ -228,8 +235,10 @@ if __name__ == "__main__":
     parser.add_argument("--mode", required=True, choices=['temperature', 'object'])
     parser.add_argument("--rearm_time", type=int, default=5)
 
-    # Args de Temperatura
+    # Args de Temperatura e Objetos (ROI é comum)
     parser.add_argument("--roi", type=lambda x: [int(i) for i in x.split(',')])
+
+    # Args de Temperatura
     parser.add_argument("--limite", type=float)
     parser.add_argument("--receptor_url")
     parser.add_argument("--receptor_port", type=int)
@@ -257,7 +266,8 @@ if __name__ == "__main__":
             print(f"[{args.name}] Iniciando em modo de DETECÇÃO DE OBJETOS.", flush=True)
             start_yolo_monitoring(
                 args.name, args.url, args.object_ids, args.device,
-                args.rearm_time, args.quantity, args.exact_number, args.sensitivity
+                args.rearm_time, args.quantity, args.exact_number, args.sensitivity,
+                args.roi
             )
 
     except Exception as e:
