@@ -1,11 +1,12 @@
 import cv2
-from PySide6.QtWidgets import (QLabel, QDialog, QVBoxLayout, QHBoxLayout, QMessageBox,
+import numpy as np
+from PySide6.QtWidgets import (QApplication, QLabel, QDialog, QVBoxLayout, QHBoxLayout, QMessageBox,
                                QLineEdit, QPushButton, QCheckBox, QComboBox, QWidget,
-                               QFormLayout, QGroupBox, QStackedWidget)
-from PySide6.QtCore import QTimer, Qt, QPoint, QRect, Signal
-from PySide6.QtGui import QImage, QPixmap, QPainter, QPen, QColor
+                               QFormLayout, QGroupBox, QStackedWidget, QSizePolicy)
+from PySide6.QtCore import QTimer, Qt, QPoint, QRect, Signal, QSize
+from PySide6.QtGui import QImage, QPixmap, QPainter, QPen, QColor, QCursor, QPolygon
 
-# Classe YOLO_CLASSES movida para cá para ser acessível pela LiveView
+# (O dicionário YOLO_CLASSES permanece o mesmo)
 YOLO_CLASSES = {0: 'pessoa', 1: 'bicicleta', 2: 'carro', 3: 'motocicleta', 4: 'avião', 5: 'ônibus', 6: 'trem',
                 7: 'caminhão', 8: 'barco', 9: 'semáforo', 10: 'hidrante', 11: 'placa de pare', 12: 'parquímetro',
                 13: 'banco', 14: 'pássaro', 15: 'gato', 16: 'cão', 17: 'cavalo', 18: 'ovelha', 19: 'vaca',
@@ -69,10 +70,11 @@ class LiveViewDialog(QDialog):
         if not self.latest_detections:
             return frame
 
-        roi = self.latest_detections.get('roi')
-        if roi:
-            y1, y2, x1, x2 = roi
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 0), 2)
+        roi_points = self.latest_detections.get('roi')
+        if roi_points and len(roi_points) > 2:
+            pts = np.array(roi_points, np.int32)
+            pts = pts.reshape((-1, 1, 2))
+            cv2.polylines(frame, [pts], isClosed=True, color=(255, 0, 0), thickness=2)
 
         offset_x, offset_y = self.latest_detections.get('offset', (0, 0))
 
@@ -118,38 +120,111 @@ class LiveViewDialog(QDialog):
         event.accept()
 
 
-class ClickableLabel(QLabel):
-    roiSelected = Signal(QRect)
+class PolygonRoiLabel(QLabel):
+    handle_size = 8
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.begin = QPoint()
-        self.end = QPoint()
-        self.drawing = False
-
-    def mousePressEvent(self, event):
-        self.begin = event.position().toPoint()
-        self.end = self.begin
-        self.drawing = True
-        self.update()
-
-    def mouseMoveEvent(self, event):
-        if self.drawing: self.end = event.position().toPoint()
-        self.update()
-
-    def mouseReleaseEvent(self, event):
-        if not self.drawing: return
-        self.drawing = False
-        self.end = event.position().toPoint()
-        self.roiSelected.emit(QRect(self.begin, self.end).normalized())
-        self.update()
+        self.points = []
+        self.polygon_closed = False
+        self.dragging_point_index = -1
+        self.dragging_polygon = False
+        self.start_drag_pos = QPoint()
+        self.start_drag_points = []
+        self.setMouseTracking(True)
+        self.setCursor(Qt.CrossCursor)
 
     def paintEvent(self, event):
         super().paintEvent(event)
-        if not self.begin.isNull() and not self.end.isNull():
-            painter = QPainter(self)
-            painter.setPen(QPen(QColor("#A3BE8C"), 2, Qt.SolidLine))
-            painter.drawRect(QRect(self.begin, self.end).normalized())
+        if not self.points:
+            return
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        pen = QPen(QColor("#A3BE8C"), 2, Qt.SolidLine)
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
+
+        if len(self.points) > 1:
+            painter.drawPolyline(self.points)
+
+        if not self.polygon_closed and len(self.points) > 0:
+            painter.drawLine(self.points[-1], self.mapFromGlobal(QCursor.pos()))
+
+        handle_color = QColor("#D8DEE9")
+        pen.setWidth(1)
+        pen.setColor(QColor("#2E3440"))
+        painter.setPen(pen)
+
+        for i, p in enumerate(self.points):
+            if i == 0 and not self.polygon_closed and len(self.points) > 2:
+                painter.setBrush(QColor("#BF616A"))
+            else:
+                painter.setBrush(handle_color)
+            painter.drawEllipse(p, self.handle_size // 2, self.handle_size // 2)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            pos = event.pos()
+
+            if not self.polygon_closed and len(self.points) > 2 and self.get_handle_at(pos) == 0:
+                self.polygon_closed = True
+                self.points.append(self.points[0])
+                self.update()
+                return
+
+            handle_index = self.get_handle_at(pos)
+            if handle_index is not None:
+                self.dragging_point_index = handle_index
+                return
+
+            if self.polygon_closed and QPolygon(self.points).containsPoint(pos, Qt.OddEvenFill):
+                self.dragging_polygon = True
+                self.start_drag_pos = pos
+                self.start_drag_points = [QPoint(p) for p in self.points]
+                return
+
+            if not self.polygon_closed:
+                self.points.append(pos)
+                self.update()
+
+    def mouseMoveEvent(self, event):
+        pos = event.pos()
+        if self.dragging_point_index != -1:
+            self.points[self.dragging_point_index] = pos
+            if self.polygon_closed and (
+                    self.dragging_point_index == 0 or self.dragging_point_index == len(self.points) - 1):
+                self.points[0] = pos
+                self.points[-1] = pos
+            self.update()
+        elif self.dragging_polygon:
+            delta = pos - self.start_drag_pos
+            self.points = [p + delta for p in self.start_drag_points]
+            self.update()
+        else:
+            self.update_cursor(pos)
+
+        self.update()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.dragging_point_index = -1
+            self.dragging_polygon = False
+
+    def get_handle_at(self, pos):
+        for i, p in enumerate(self.points):
+            if (p - pos).manhattanLength() < self.handle_size:
+                return i
+        return None
+
+    def update_cursor(self, pos):
+        if self.get_handle_at(pos) is not None:
+            self.setCursor(Qt.PointingHandCursor)
+        elif self.polygon_closed and QPolygon(self.points).containsPoint(pos, Qt.OddEvenFill):
+            self.setCursor(Qt.SizeAllCursor)
+        else:
+            self.setCursor(Qt.CrossCursor)
 
 
 class ROISelector(QDialog):
@@ -164,16 +239,20 @@ class ROISelector(QDialog):
         else:
             self.cap = cv2.VideoCapture(video_source)
 
-        self.image_label = ClickableLabel(self)
+        self.image_label = PolygonRoiLabel(self)
         self.image_label.setAlignment(Qt.AlignCenter)
-        self.image_label.roiSelected.connect(self.on_roi_selected)
+        self.image_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.layout = QVBoxLayout(self)
         self.layout.addWidget(self.image_label)
         self.setMinimumSize(800, 600)
-        self.roi_rect = None
+
+        self.final_roi_points = None
         self.original_frame = None
         self.original_frame_size = None
         self.initial_roi_coords = existing_roi
+
+        self.setup_buttons()
+
         if not self.cap.isOpened():
             QMessageBox.critical(self, "Erro", f"Não foi possível conectar à câmera em {video_url}")
             QTimer.singleShot(0, self.reject)
@@ -181,6 +260,24 @@ class ROISelector(QDialog):
             self.timer = QTimer(self)
             self.timer.timeout.connect(self.try_capture_frame)
             self.timer.start(50)
+
+    def setup_buttons(self):
+        buttons_layout = QHBoxLayout()
+        confirm_button = QPushButton("Confirmar")
+        clear_button = QPushButton("Limpar")
+        cancel_button = QPushButton("Cancelar")
+
+        buttons_layout.addStretch()
+        buttons_layout.addWidget(cancel_button)
+        buttons_layout.addWidget(clear_button)
+        buttons_layout.addWidget(confirm_button)
+        buttons_layout.addStretch()
+
+        self.layout.addLayout(buttons_layout)
+
+        confirm_button.clicked.connect(self.confirm_selection)
+        clear_button.clicked.connect(self.clear_selection)
+        cancel_button.clicked.connect(self.reject)
 
     def try_capture_frame(self):
         if not self.cap.isOpened(): self.timer.stop(); return
@@ -191,29 +288,10 @@ class ROISelector(QDialog):
             self.original_frame = frame
             h, w, _ = self.original_frame.shape
             self.original_frame_size = (w, h)
-            self.setWindowTitle("Definir Área - Arraste o mouse para desenhar")
+            self.setWindowTitle("Definir Área - Clique para adicionar pontos, mova-os ou feche o polígono")
             self.update_display()
-            if self.initial_roi_coords: self.draw_existing_roi()
-
-    def draw_existing_roi(self):
-        if self.original_frame_size is None: return
-        orig_y1, orig_y2, orig_x1, orig_x2 = self.initial_roi_coords
-        original_w, original_h = self.original_frame_size
-        displayed_pixmap = self.image_label.pixmap()
-        if not displayed_pixmap or displayed_pixmap.isNull(): return
-        displayed_w = displayed_pixmap.width()
-        displayed_h = displayed_pixmap.height()
-        x_scale = displayed_w / original_w
-        y_scale = displayed_h / original_h
-        x_offset = (self.image_label.width() - displayed_w) / 2
-        y_offset = (self.image_label.height() - displayed_h) / 2
-        display_x1 = int(orig_x1 * x_scale + x_offset)
-        display_y1 = int(orig_y1 * y_scale + y_offset)
-        display_x2 = int(orig_x2 * x_scale + x_offset)
-        display_y2 = int(orig_y2 * y_scale + y_offset)
-        self.image_label.begin = QPoint(display_x1, display_y1)
-        self.image_label.end = QPoint(display_x2, display_y2)
-        self.image_label.update()
+            if self.initial_roi_coords:
+                self.load_existing_roi()
 
     def update_display(self):
         if self.original_frame is None: return
@@ -225,38 +303,88 @@ class ROISelector(QDialog):
         scaled_pixmap = pixmap.scaled(self.image_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
         self.image_label.setPixmap(scaled_pixmap)
 
-    def on_roi_selected(self, selection_rect):
-        if self.original_frame_size is None: return
+    def load_existing_roi(self):
+        if self.original_frame_size is None or not self.initial_roi_coords: return
+
+        pixmap_rect = self.get_pixmap_rect_in_label()
+        if pixmap_rect.isNull(): return
+
+        x_scale = pixmap_rect.width() / self.original_frame_size[0]
+        y_scale = pixmap_rect.height() / self.original_frame_size[1]
+
+        loaded_points = []
+        for p in self.initial_roi_coords:
+            px = int(p[0] * x_scale + pixmap_rect.left())
+            py = int(p[1] * y_scale + pixmap_rect.top())
+            loaded_points.append(QPoint(px, py))
+
+        self.image_label.points = loaded_points
+        if len(loaded_points) > 2:
+            self.image_label.polygon_closed = True
+            if loaded_points: self.image_label.points.append(loaded_points[0])
+        self.image_label.update()
+
+    def get_pixmap_rect_in_label(self):
+        if not self.image_label.pixmap() or self.image_label.pixmap().isNull():
+            return QRect()
+
+        pixmap_size = self.image_label.pixmap().size()
+        label_size = self.image_label.size()
+
+        scaled_size = pixmap_size.scaled(label_size, Qt.KeepAspectRatio)
+
+        x_offset = (label_size.width() - scaled_size.width()) / 2
+        y_offset = (label_size.height() - scaled_size.height()) / 2
+
+        return QRect(x_offset, y_offset, scaled_size.width(), scaled_size.height())
+
+    def confirm_selection(self):
+        points = self.image_label.points
+        if not points or not self.original_frame_size:
+            self.final_roi_points = []
+            self.accept()
+            return
+
+        pixmap_rect = self.get_pixmap_rect_in_label()
+        if pixmap_rect.isNull() or pixmap_rect.width() == 0 or pixmap_rect.height() == 0:
+            return
+
         original_w, original_h = self.original_frame_size
-        displayed_pixmap = self.image_label.pixmap()
-        if not displayed_pixmap or displayed_pixmap.isNull(): return
-        displayed_w, displayed_h = displayed_pixmap.width(), displayed_pixmap.height()
-        if displayed_w == 0 or displayed_h == 0: return
-        x_scale = original_w / displayed_w
-        y_scale = original_h / displayed_h
-        x_offset = (self.image_label.width() - displayed_w) / 2
-        y_offset = (self.image_label.height() - displayed_h) / 2
-        orig_x1 = int((selection_rect.left() - x_offset) * x_scale)
-        orig_y1 = int((selection_rect.top() - y_offset) * y_scale)
-        orig_x2 = int((selection_rect.right() - x_offset) * x_scale)
-        orig_y2 = int((selection_rect.bottom() - y_offset) * y_scale)
-        self.roi_rect = [max(0, orig_y1), min(original_h, orig_y2), max(0, orig_x1), min(original_w, orig_x2)]
+
+        x_scale = original_w / pixmap_rect.width()
+        y_scale = original_h / pixmap_rect.height()
+
+        self.final_roi_points = []
+        points_to_convert = points[:-1] if self.image_label.polygon_closed and len(points) > 1 else points
+
+        for p in points_to_convert:
+            orig_x = int((p.x() - pixmap_rect.left()) * x_scale)
+            orig_y = int((p.y() - pixmap_rect.top()) * y_scale)
+            self.final_roi_points.append([max(0, orig_x), max(0, orig_y)])
+
         self.accept()
+
+    def clear_selection(self):
+        self.image_label.points = []
+        self.image_label.polygon_closed = False
+        self.image_label.update()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self.update_display()
-        if self.initial_roi_coords: self.draw_existing_roi()
+        self.load_existing_roi()
 
     def closeEvent(self, event):
-        if self.cap.isOpened(): self.cap.release()
+        if self.cap and self.cap.isOpened():
+            self.cap.release()
         super().closeEvent(event)
 
     @staticmethod
     def get_roi(video_url, existing_roi=None, parent=None):
         dialog = ROISelector(video_url, existing_roi, parent)
-        if dialog.exec() == QDialog.Accepted: return dialog.roi_rect
-        return None
+        if dialog.exec() == QDialog.Accepted:
+            return dialog.final_roi_points
+        return existing_roi
 
 
 class CameraConfigDialog(QDialog):
@@ -292,14 +420,14 @@ class CameraConfigDialog(QDialog):
         temp_groupbox = QGroupBox("Parâmetros de Leitura de Temperatura (OCR)")
         temp_layout = QFormLayout(temp_groupbox)
         self.limite_edit = QLineEdit()
-        self.receptor_edit = QLineEdit()
-        self.receptor_port_edit = QLineEdit("5000")
+        self.receptor_edit_ocr = QLineEdit()
+        self.receptor_port_edit_ocr = QLineEdit("5000")
         self.set_roi_button = QPushButton("Definir Área de Leitura (ROI)")
         self.roi_label = QLabel("Área não definida")
         self.gpu_checkbox_ocr = QCheckBox("Usar GPU (EasyOCR)")
         temp_layout.addRow("Limite de Temperatura (°C):", self.limite_edit)
-        temp_layout.addRow("URL do PC Receptor:", self.receptor_edit)
-        temp_layout.addRow("Porta do Receptor:", self.receptor_port_edit)
+        temp_layout.addRow("URL do PC Receptor:", self.receptor_edit_ocr)
+        temp_layout.addRow("Porta do Receptor:", self.receptor_port_edit_ocr)
         temp_layout.addRow(self.set_roi_button)
         temp_layout.addRow(self.roi_label)
         temp_layout.addRow(self.gpu_checkbox_ocr)
@@ -314,6 +442,10 @@ class CameraConfigDialog(QDialog):
         self.sensitivity_edit = QLineEdit("0")
         self.sensitivity_edit.setPlaceholderText("Tempo que a condição deve durar")
 
+        # --- ALTERAÇÃO AQUI: Campos de receptor para o modo YOLO ---
+        self.receptor_edit_yolo = QLineEdit()
+        self.receptor_port_edit_yolo = QLineEdit("5000")
+
         self.use_roi_checkbox_yolo = QCheckBox("Usar Área de Detecção (ROI)")
         self.use_roi_checkbox_yolo.toggled.connect(self.toggle_roi_widgets)
 
@@ -327,6 +459,8 @@ class CameraConfigDialog(QDialog):
         yolo_layout.addRow("Quantidade de Objetos:", self.quantity_edit)
         yolo_layout.addRow("Número Exato:", self.exact_number_checkbox)
         yolo_layout.addRow("Sensibilidade (s):", self.sensitivity_edit)
+        yolo_layout.addRow("URL do PC Receptor:", self.receptor_edit_yolo)
+        yolo_layout.addRow("Porta do Receptor:", self.receptor_port_edit_yolo)
         yolo_layout.addRow(self.use_roi_checkbox_yolo)
         yolo_layout.addRow(self.set_roi_button_yolo)
         yolo_layout.addRow(self.roi_label_yolo)
@@ -372,6 +506,9 @@ class CameraConfigDialog(QDialog):
             self.exact_number_checkbox.setChecked(data.get('exact_number', False))
             self.sensitivity_edit.setText(str(data.get('sensitivity', 0)))
             self.gpu_checkbox_yolo.setChecked(data.get('use_gpu', True))
+            # --- ALTERAÇÃO AQUI: Carrega dados do receptor para o modo YOLO ---
+            self.receptor_edit_yolo.setText(data.get('receptor', ''))
+            self.receptor_port_edit_yolo.setText(str(data.get('receptor_port', '5000')))
 
             use_roi = data.get('use_roi', False)
             self.use_roi_checkbox_yolo.setChecked(use_roi)
@@ -379,17 +516,17 @@ class CameraConfigDialog(QDialog):
 
             self.roi_coords = data.get('roi')
             if use_roi and self.roi_coords:
-                self.roi_label_yolo.setText(f"Área definida: {self.roi_coords}")
+                self.roi_label_yolo.setText(f"Área definida")
                 self.roi_label_yolo.setStyleSheet("color: #A3BE8C;")
         else:
             self.mode_combo.setCurrentIndex(0)
             self.limite_edit.setText(str(data.get('limite', '')))
-            self.receptor_edit.setText(data.get('receptor', ''))
-            self.receptor_port_edit.setText(str(data.get('receptor_port', '5000')))
+            self.receptor_edit_ocr.setText(data.get('receptor', ''))
+            self.receptor_port_edit_ocr.setText(str(data.get('receptor_port', '5000')))
             self.roi_coords = data.get('roi')
             self.gpu_checkbox_ocr.setChecked(data.get('gpu', False))
             if self.roi_coords:
-                self.roi_label.setText(f"Área definida: {self.roi_coords}")
+                self.roi_label.setText(f"Área definida")
                 self.roi_label.setStyleSheet("color: #A3BE8C;")
 
     def get_config(self):
@@ -410,8 +547,8 @@ class CameraConfigDialog(QDialog):
             config['mode'] = 'temperature'
             try:
                 config['limite'] = float(self.limite_edit.text().replace(',', '.'))
-                config['receptor_port'] = int(self.receptor_port_edit.text())
-                config['receptor'] = self.receptor_edit.text()
+                config['receptor_port'] = int(self.receptor_port_edit_ocr.text())
+                config['receptor'] = self.receptor_edit_ocr.text()
                 config['gpu'] = self.gpu_checkbox_ocr.isChecked()
                 config['roi'] = self.roi_coords
                 if not all([config['receptor'], self.roi_coords]):
@@ -431,6 +568,10 @@ class CameraConfigDialog(QDialog):
                 config['exact_number'] = self.exact_number_checkbox.isChecked()
                 config['sensitivity'] = int(self.sensitivity_edit.text())
                 config['use_gpu'] = self.gpu_checkbox_yolo.isChecked()
+
+                # --- ALTERAÇÃO AQUI: Salva dados do receptor para o modo YOLO ---
+                config['receptor'] = self.receptor_edit_yolo.text()
+                config['receptor_port'] = int(self.receptor_port_edit_yolo.text())
 
                 config['use_roi'] = self.use_roi_checkbox_yolo.isChecked()
                 if config['use_roi']:
@@ -455,13 +596,16 @@ class CameraConfigDialog(QDialog):
             return
 
         roi = ROISelector.get_roi(video_url_text, self.roi_coords, self)
-        if roi:
-            self.roi_coords = roi
-            label_text = f"Área definida: {self.roi_coords}"
-            style_sheet = "color: #A3BE8C;"
-            if self.mode_combo.currentIndex() == 0:
-                self.roi_label.setText(label_text)
-                self.roi_label.setStyleSheet(style_sheet)
-            else:
-                self.roi_label_yolo.setText(label_text)
-                self.roi_label_yolo.setStyleSheet(style_sheet)
+
+        self.roi_coords = roi if roi is not None else self.roi_coords
+
+        label_text = "Área definida" if self.roi_coords else "Área não definida"
+        style_sheet = "color: #A3BE8C;" if self.roi_coords else ""
+
+        if self.mode_combo.currentIndex() == 0:
+            self.roi_label.setText(label_text)
+            self.roi_label.setStyleSheet(style_sheet)
+        else:
+            self.roi_label_yolo.setText(
+                label_text if self.use_roi_checkbox_yolo.isChecked() else "Área não definida (tela inteira)")
+            self.roi_label_yolo.setStyleSheet(style_sheet if self.use_roi_checkbox_yolo.isChecked() else "")
