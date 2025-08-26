@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                QHeaderView, QStyle, QSplitter, QDialog)
 from PySide6.QtCore import Qt, QRect, QPropertyAnimation, QSequentialAnimationGroup, Signal, QObject
 from PySide6.QtGui import QColor, QKeySequence, QShortcut, QIcon, QPixmap, QPainter, QPen
-from ui_components import CameraConfigDialog, LiveViewDialog  # LiveViewDialog importado aqui
+from ui_components import CameraConfigDialog, LiveViewDialog
 
 
 def resource_path(relative_path):
@@ -25,7 +25,7 @@ def resource_path(relative_path):
 class WorkerSignals(QObject):
     log_received = Signal(dict)
     error_received = Signal(dict)
-    detection_received = Signal(dict)  # NOVO SINAL
+    detection_received = Signal(dict)
     finished = Signal(str)
 
 
@@ -37,7 +37,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Sistema de Monitoramento Inteligente")
         self.setGeometry(100, 100, 900, 500)
         self.running_processes = {}
-        self.live_view_dialogs = {}  # Dicionário para gerenciar janelas de live view
+        self.live_view_dialogs = {}
 
         main_widget = QWidget()
         self.setCentralWidget(main_widget)
@@ -63,7 +63,7 @@ class MainWindow(QMainWindow):
         self.add_cam_button = QPushButton("Adicionar Câmera")
         self.edit_cam_button = QPushButton("Editar Câmera")
         self.remove_cam_button = QPushButton("Remover Câmeras")
-        self.view_cam_button = QPushButton("Ver ao Vivo")  # NOVO BOTÃO
+        self.view_cam_button = QPushButton("Ver ao Vivo")
         right_panel.addWidget(self.add_cam_button)
         right_panel.addWidget(self.edit_cam_button)
         right_panel.addWidget(self.remove_cam_button)
@@ -99,7 +99,7 @@ class MainWindow(QMainWindow):
         self.worker_signals = WorkerSignals()
         self.worker_signals.log_received.connect(self.add_log_entry)
         self.worker_signals.error_received.connect(self.add_error_entry)
-        self.worker_signals.detection_received.connect(self.on_detection_received)  # CONEXÃO DO SINAL
+        self.worker_signals.detection_received.connect(self.on_detection_received)
         self.worker_signals.finished.connect(self.on_worker_finished)
 
         self.camera_table.itemDoubleClicked.connect(self.edit_camera)
@@ -107,7 +107,7 @@ class MainWindow(QMainWindow):
         self.add_cam_button.clicked.connect(self.add_camera)
         self.edit_cam_button.clicked.connect(self.edit_camera)
         self.remove_cam_button.clicked.connect(self.remove_cameras)
-        self.view_cam_button.clicked.connect(self.show_live_view)  # CONEXÃO DO BOTÃO
+        self.view_cam_button.clicked.connect(self.show_live_view)
         self.start_button.clicked.connect(self.start_monitoring)
         self.stop_button.clicked.connect(self.stop_monitoring)
 
@@ -129,15 +129,8 @@ class MainWindow(QMainWindow):
             self.live_view_dialogs[cam_name].update_detections(data)
 
     def on_worker_finished(self, cam_name):
-        print(f"Worker da câmera '{cam_name}' finalizou. Atualizando status.")
         if cam_name in self.running_processes:
             self.running_processes.pop(cam_name)
-
-        for row in range(self.camera_table.rowCount()):
-            if self.camera_table.item(row, 0).text() == cam_name:
-                config = self.camera_table.item(row, 0).data(Qt.UserRole)
-                self.add_or_update_camera_in_table(cam_name, config, row)
-                break
         self.update_button_states()
 
     def stream_reader(self, process, cam_name):
@@ -161,7 +154,6 @@ class MainWindow(QMainWindow):
         process.wait()
         self.worker_signals.finished.emit(cam_name)
 
-    # (As funções add_log_entry, add_error_entry, create_themed_icon, animate_click permanecem as mesmas)
     def add_log_entry(self, log_data):
         row_position = self.log_table.rowCount()
         self.log_table.insertRow(row_position)
@@ -242,7 +234,6 @@ class MainWindow(QMainWindow):
             self.start_button.setEnabled(can_start)
             self.stop_button.setEnabled(can_stop)
 
-    # (As funções add_or_update_camera_in_table, load_cameras, save_cameras, get_selected_rows, add_camera, edit_camera, open_camera_dialog, remove_cameras permanecem as mesmas)
     def add_or_update_camera_in_table(self, cam_name, config, row_to_update=None):
         name_item = QTableWidgetItem(cam_name)
         name_item.setData(Qt.UserRole, config)
@@ -302,6 +293,8 @@ class MainWindow(QMainWindow):
                                              QMessageBox.Yes | QMessageBox.No)
                 if reply == QMessageBox.Yes:
                     self._stop_single_camera(cam_name)
+                    if cam_name in self.live_view_dialogs:
+                        self.live_view_dialogs[cam_name].update_detections({})
                     time.sleep(0.5)
                     self.add_or_update_camera_in_table(new_name, config, dialog.row)
                     self.save_cameras()
@@ -321,8 +314,7 @@ class MainWindow(QMainWindow):
         if reply == QMessageBox.Yes:
             for row in sorted(selected_rows, reverse=True):
                 cam_name = self.camera_table.item(row, 0).text()
-                if cam_name in self.running_processes:
-                    self._stop_single_camera(cam_name)
+                self._stop_single_camera(cam_name)
                 self.camera_table.removeRow(row)
             self.save_cameras()
             self.update_button_states()
@@ -367,26 +359,30 @@ class MainWindow(QMainWindow):
             '--rearm_time', str(config.get('rearm_time', 5))
         ]
 
+        # --- ALTERAÇÃO AQUI: Passa os parâmetros do receptor para ambos os modos ---
+        if config.get('receptor'):
+            command.extend(['--receptor_url', config.get('receptor', '')])
+            command.extend(['--receptor_port', str(config.get('receptor_port', 5000))])
+
+        roi_config = config.get('roi')
+        use_roi = config.get('use_roi', True)
+        if config.get('mode') == 'object':
+            use_roi = config.get('use_roi', False)
+
+        if use_roi and roi_config and isinstance(roi_config, list):
+            flat_list = [str(coord) for point in roi_config for coord in point]
+            command.extend(['--roi', ','.join(flat_list)])
+
         if config.get('mode') == 'object':
             command.extend(['--object_ids', config.get('object_ids', '')])
             command.extend(['--quantity', str(config.get('quantity', 1))])
-            if config.get('exact_number', False):
-                command.append('--exact_number')
+            if config.get('exact_number', False): command.append('--exact_number')
             command.extend(['--sensitivity', str(config.get('sensitivity', 0))])
-
-            if config.get('use_roi') and config.get('roi'):
-                command.extend(['--roi', ','.join(map(str, config['roi']))])
-
-            use_gpu = config.get('use_gpu', True)
-            device_arg = '0' if use_gpu else 'cpu'
+            device_arg = '0' if config.get('use_gpu', True) else 'cpu'
             command.extend(['--device', device_arg])
         else:  # Modo temperatura
-            command.extend(['--roi', ','.join(map(str, config.get('roi', [0, 0, 0, 0])))])
             command.extend(['--limite', str(config.get('limite', 0))])
-            command.extend(['--receptor_url', config.get('receptor', '')])
-            command.extend(['--receptor_port', str(config.get('receptor_port', 5000))])
-            if config.get('gpu', False):
-                command.append('--gpu')
+            if config.get('gpu', False): command.append('--gpu')
 
         try:
             process = subprocess.Popen(
@@ -417,18 +413,25 @@ class MainWindow(QMainWindow):
             except subprocess.TimeoutExpired:
                 process.kill()
 
+            for row in range(self.camera_table.rowCount()):
+                if self.camera_table.item(row, 0).text() == cam_name:
+                    config = self.camera_table.item(row, 0).data(Qt.UserRole)
+                    self.add_or_update_camera_in_table(cam_name, config, row)
+                    break
+
     def stop_monitoring(self):
         selected_rows = self.get_selected_rows()
         if not selected_rows: return
         for row in selected_rows:
             cam_name = self.camera_table.item(row, 0).text()
             self._stop_single_camera(cam_name)
+        self.update_button_states()
 
     def closeEvent(self, event):
         for dialog in self.live_view_dialogs.values():
             dialog.close()
-        for process in self.running_processes.values():
-            process.terminate()
+        for cam_name in list(self.running_processes.keys()):
+            self._stop_single_camera(cam_name)
         event.accept()
 
 
