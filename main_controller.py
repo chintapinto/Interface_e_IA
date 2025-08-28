@@ -1,14 +1,12 @@
 import sys
 import json
 import os
-import subprocess
-import threading
 import time
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                QHBoxLayout, QPushButton, QLabel, QMessageBox,
                                QTableWidget, QTableWidgetItem, QAbstractItemView,
                                QHeaderView, QStyle, QSplitter, QDialog)
-from PySide6.QtCore import Qt, QRect, QPropertyAnimation, QSequentialAnimationGroup, Signal, QObject
+from PySide6.QtCore import Qt, QRect, QPropertyAnimation, QSequentialAnimationGroup, QTimer, QProcess
 from PySide6.QtGui import QColor, QKeySequence, QShortcut, QIcon, QPixmap, QPainter, QPen
 from ui_components import CameraConfigDialog, LiveViewDialog
 
@@ -22,20 +20,13 @@ def resource_path(relative_path):
     return os.path.join(base_path, relative_path)
 
 
-class WorkerSignals(QObject):
-    log_received = Signal(dict)
-    error_received = Signal(dict)
-    detection_received = Signal(dict)
-    finished = Signal(str)
-
-
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         icon = self.create_themed_icon()
         self.setWindowIcon(icon)
         self.setWindowTitle("Sistema de Monitoramento Inteligente")
-        self.setGeometry(100, 100, 900, 500)
+        self.setGeometry(125, 50, 1000, 600)
         self.running_processes = {}
         self.live_view_dialogs = {}
 
@@ -96,12 +87,6 @@ class MainWindow(QMainWindow):
         splitter.setSizes([400, 300])
         main_layout.addWidget(splitter)
 
-        self.worker_signals = WorkerSignals()
-        self.worker_signals.log_received.connect(self.add_log_entry)
-        self.worker_signals.error_received.connect(self.add_error_entry)
-        self.worker_signals.detection_received.connect(self.on_detection_received)
-        self.worker_signals.finished.connect(self.on_worker_finished)
-
         self.camera_table.itemDoubleClicked.connect(self.edit_camera)
         self.camera_table.itemSelectionChanged.connect(self.update_button_states)
         self.add_cam_button.clicked.connect(self.add_camera)
@@ -131,28 +116,39 @@ class MainWindow(QMainWindow):
     def on_worker_finished(self, cam_name):
         if cam_name in self.running_processes:
             self.running_processes.pop(cam_name)
+
+        for row in range(self.camera_table.rowCount()):
+            if self.camera_table.item(row, 0).text() == cam_name:
+                config = self.camera_table.item(row, 0).data(Qt.UserRole)
+                self.add_or_update_camera_in_table(cam_name, config, row)
+                break
         self.update_button_states()
 
-    def stream_reader(self, process, cam_name):
-        for line in iter(process.stdout.readline, ''):
-            if not line: break
+    def handle_process_output(self):
+        process = self.sender()
+        cam_name = process.property("cam_name")
+        output = process.readAllStandardOutput().data().decode('utf-8').strip()
+
+        for line in output.split('\n'):
+            if not line:
+                continue
             try:
                 data = json.loads(line)
                 if isinstance(data, dict):
                     msg_type = data.get("type")
                     if msg_type == "alert":
-                        self.worker_signals.log_received.emit(data)
+                        self.add_log_entry(data)
                     elif msg_type == "error":
-                        self.worker_signals.error_received.emit(data)
+                        self.add_error_entry(data)
                     elif msg_type == "detection":
-                        self.worker_signals.detection_received.emit(data)
-                    else:
-                        print(f"[{cam_name}] (saída ignorada): {data}")
+                        self.on_detection_received(data)
             except json.JSONDecodeError:
-                print(f"[{cam_name}]: {line.strip()}")
-        process.stdout.close()
-        process.wait()
-        self.worker_signals.finished.emit(cam_name)
+                log_data = {
+                    "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "camera": cam_name,
+                    "message": line
+                }
+                self.add_log_entry(log_data)
 
     def add_log_entry(self, log_data):
         row_position = self.log_table.rowCount()
@@ -256,16 +252,19 @@ class MainWindow(QMainWindow):
             self.camera_table.setRowCount(0)
             for cam_name, config in cameras.items():
                 self.add_or_update_camera_in_table(cam_name, config)
-        except json.JSONDecodeError:
-            print("Aviso: 'cameras_config.json' está corrompido.")
+        except (json.JSONDecodeError, FileNotFoundError) as e:
+            QMessageBox.warning(self, "Aviso", f"Não foi possível carregar 'cameras_config.json':\n{e}")
 
     def save_cameras(self):
         cameras = {}
-        for row in range(self.camera_table.rowCount()):
-            name_item = self.camera_table.item(row, 0)
-            cameras[name_item.text()] = name_item.data(Qt.UserRole)
-        with open('cameras_config.json', 'w', encoding='utf-8') as f:
-            json.dump(cameras, f, indent=4)
+        try:
+            for row in range(self.camera_table.rowCount()):
+                name_item = self.camera_table.item(row, 0)
+                cameras[name_item.text()] = name_item.data(Qt.UserRole)
+            with open('cameras_config.json', 'w', encoding='utf-8') as f:
+                json.dump(cameras, f, indent=4)
+        except Exception as e:
+            QMessageBox.critical(self, "Erro", f"Não foi possível salvar as configurações:\n{e}")
 
     def get_selected_rows(self):
         return sorted(list(set(item.row() for item in self.camera_table.selectedItems())))
@@ -287,6 +286,11 @@ class MainWindow(QMainWindow):
             if not config: return
             new_name = config.get('name')
             was_running = cam_name in self.running_processes
+
+            # Atualiza a tabela primeiro
+            self.add_or_update_camera_in_table(new_name, config, dialog.row)
+            self.save_cameras()
+
             if was_running:
                 reply = QMessageBox.question(self, "Aplicar Alterações",
                                              f"Para aplicar as novas configurações na câmera '{cam_name}', ela precisa ser reiniciada. Deseja continuar?",
@@ -295,16 +299,9 @@ class MainWindow(QMainWindow):
                     self._stop_single_camera(cam_name)
                     if cam_name in self.live_view_dialogs:
                         self.live_view_dialogs[cam_name].update_detections({})
-                    time.sleep(0.5)
-                    self.add_or_update_camera_in_table(new_name, config, dialog.row)
-                    self.save_cameras()
-                    self._start_single_camera(dialog.row)
-                else:
-                    self.add_or_update_camera_in_table(new_name, config, dialog.row)
-                    self.save_cameras()
-            else:
-                self.add_or_update_camera_in_table(new_name, config, dialog.row)
-                self.save_cameras()
+
+                    # Usa QTimer para reiniciar de forma assíncrona, sem bloquear a UI
+                    QTimer.singleShot(500, lambda: self._start_single_camera_by_name(new_name))
 
     def remove_cameras(self):
         selected_rows = self.get_selected_rows()
@@ -342,6 +339,13 @@ class MainWindow(QMainWindow):
         if cam_name in self.live_view_dialogs:
             del self.live_view_dialogs[cam_name]
 
+    def _start_single_camera_by_name(self, cam_name):
+        """Encontra a câmera pelo nome e inicia."""
+        for row in range(self.camera_table.rowCount()):
+            if self.camera_table.item(row, 0).text() == cam_name:
+                self._start_single_camera(row)
+                return
+
     def _start_single_camera(self, row):
         name_item = self.camera_table.item(row, 0)
         cam_name = name_item.text()
@@ -351,49 +355,49 @@ class MainWindow(QMainWindow):
 
         worker_script_path = resource_path('detector_worker.py')
 
-        command = [
-            sys.executable, worker_script_path,
+        command_args = [
             '--name', cam_name,
-            '--url', config['url'],
+            '--url', str(config['url']),
             '--mode', config.get('mode', 'temperature'),
             '--rearm_time', str(config.get('rearm_time', 5))
         ]
 
-        # --- ALTERAÇÃO AQUI: Passa os parâmetros do receptor para ambos os modos ---
         if config.get('receptor'):
-            command.extend(['--receptor_url', config.get('receptor', '')])
-            command.extend(['--receptor_port', str(config.get('receptor_port', 5000))])
+            command_args.extend(['--receptor_url', config.get('receptor', '')])
+            command_args.extend(['--receptor_port', str(config.get('receptor_port', 5000))])
 
         roi_config = config.get('roi')
-        use_roi = config.get('use_roi', True)
-        if config.get('mode') == 'object':
-            use_roi = config.get('use_roi', False)
+        use_roi = config.get('use_roi', True) if config.get('mode') != 'object' else config.get('use_roi', False)
 
         if use_roi and roi_config and isinstance(roi_config, list):
             flat_list = [str(coord) for point in roi_config for coord in point]
-            command.extend(['--roi', ','.join(flat_list)])
+            command_args.extend(['--roi', ','.join(flat_list)])
 
         if config.get('mode') == 'object':
-            command.extend(['--object_ids', config.get('object_ids', '')])
-            command.extend(['--quantity', str(config.get('quantity', 1))])
-            if config.get('exact_number', False): command.append('--exact_number')
-            command.extend(['--sensitivity', str(config.get('sensitivity', 0))])
+            command_args.extend(['--object_ids', config.get('object_ids', '')])
+            command_args.extend(['--quantity', str(config.get('quantity', 1))])
+            if config.get('exact_number', False): command_args.append('--exact_number')
+            command_args.extend(['--sensitivity', str(config.get('sensitivity', 0))])
             device_arg = '0' if config.get('use_gpu', True) else 'cpu'
-            command.extend(['--device', device_arg])
-        else:  # Modo temperatura
-            command.extend(['--limite', str(config.get('limite', 0))])
-            if config.get('gpu', False): command.append('--gpu')
+            command_args.extend(['--device', device_arg])
+        else:
+            command_args.extend(['--limite', str(config.get('limite', 0))])
+            if config.get('gpu', False): command_args.append('--gpu')
 
         try:
-            process = subprocess.Popen(
-                command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                encoding='utf-8', bufsize=1, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+            process = QProcess(self)
+            process.setProperty("cam_name", cam_name)
+            process.readyReadStandardOutput.connect(self.handle_process_output)
+            process.readyReadStandardError.connect(self.handle_process_output)
+            process.finished.connect(lambda: self.on_worker_finished(cam_name))
+
+            process.start(sys.executable, [worker_script_path] + command_args)
+
             self.running_processes[cam_name] = process
-            thread = threading.Thread(target=self.stream_reader, args=(process, cam_name), daemon=True)
-            thread.start()
             self.add_or_update_camera_in_table(cam_name, config, row)
-        except FileNotFoundError:
-            QMessageBox.critical(self, "Erro", "Script 'detector_worker.py' não encontrado.")
+            self.update_button_states()
+        except Exception as e:
+            QMessageBox.critical(self, "Erro", f"Falha ao iniciar o worker: {e}")
             return False
         return True
 
@@ -402,22 +406,15 @@ class MainWindow(QMainWindow):
         if not selected_rows: return
         for row in selected_rows:
             self._start_single_camera(row)
-        self.update_button_states()
 
     def _stop_single_camera(self, cam_name):
         if cam_name in self.running_processes:
-            process = self.running_processes.pop(cam_name)
+            process = self.running_processes[cam_name]  # Não removemos ainda
+            process.finished.disconnect()  # Desconecta o sinal para evitar chamada dupla de on_worker_finished
             process.terminate()
-            try:
-                process.wait(timeout=3)
-            except subprocess.TimeoutExpired:
+            if not process.waitForFinished(3000):
                 process.kill()
-
-            for row in range(self.camera_table.rowCount()):
-                if self.camera_table.item(row, 0).text() == cam_name:
-                    config = self.camera_table.item(row, 0).data(Qt.UserRole)
-                    self.add_or_update_camera_in_table(cam_name, config, row)
-                    break
+            self.on_worker_finished(cam_name)
 
     def stop_monitoring(self):
         selected_rows = self.get_selected_rows()
@@ -425,14 +422,20 @@ class MainWindow(QMainWindow):
         for row in selected_rows:
             cam_name = self.camera_table.item(row, 0).text()
             self._stop_single_camera(cam_name)
-        self.update_button_states()
 
     def closeEvent(self, event):
-        for dialog in self.live_view_dialogs.values():
-            dialog.close()
-        for cam_name in list(self.running_processes.keys()):
-            self._stop_single_camera(cam_name)
-        event.accept()
+        reply = QMessageBox.question(self, "Confirmar Saída",
+                                     "Tem certeza que deseja fechar o programa?\nTodos os processos de monitoramento serão encerrados.",
+                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+
+        if reply == QMessageBox.Yes:
+            for dialog in self.live_view_dialogs.values():
+                dialog.close()
+            for cam_name in list(self.running_processes.keys()):
+                self._stop_single_camera(cam_name)
+            event.accept()
+        else:
+            event.ignore()
 
 
 if __name__ == "__main__":
