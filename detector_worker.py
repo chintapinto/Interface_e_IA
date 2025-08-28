@@ -9,6 +9,7 @@ from datetime import datetime
 import numpy as np
 import re
 import requests
+from constants import YOLO_CLASSES
 
 
 def report_error(cam_name, message):
@@ -59,20 +60,6 @@ try:
 except ImportError:
     YOLO_AVAILABLE = False
 
-YOLO_CLASSES = {0: 'pessoa', 1: 'bicicleta', 2: 'carro', 3: 'motocicleta', 4: 'avião', 5: 'ônibus', 6: 'trem',
-                7: 'caminhão', 8: 'barco', 9: 'semáforo', 10: 'hidrante', 11: 'placa de pare', 12: 'parquímetro',
-                13: 'banco', 14: 'pássaro', 15: 'gato', 16: 'cão', 17: 'cavalo', 18: 'ovelha', 19: 'vaca',
-                20: 'elefante', 21: 'urso', 22: 'zebra', 23: 'girafa', 24: 'mochila', 25: 'guarda-chuva', 26: 'bolsa',
-                27: 'gravata', 28: 'mala', 29: 'frisbee', 30: 'esquis', 31: 'snowboard', 32: 'bola esportiva',
-                33: 'pipa', 34: 'taco de beisebol', 35: 'luva de beisebol', 36: 'skate', 37: 'prancha de surfe',
-                38: 'raquete de tênis', 39: 'garrafa', 40: 'taça de vinho', 41: 'copo', 42: 'garfo', 43: 'faca',
-                44: 'colher', 45: 'tigela', 46: 'banana', 47: 'maçã', 48: 'sanduíche', 49: 'laranja', 50: 'brócolis',
-                51: 'cenoura', 52: 'cachorro-quente', 53: 'pizza', 54: 'donut', 55: 'bolo', 56: 'cadeira', 57: 'sofá',
-                58: 'vaso de planta', 59: 'cama', 60: 'mesa de jantar', 61: 'vaso sanitário', 62: 'tv', 63: 'laptop',
-                64: 'mouse', 65: 'controle remoto', 66: 'teclado', 67: 'celular', 68: 'micro-ondas', 69: 'forno',
-                70: 'torradeira', 71: 'pia', 72: 'geladeira', 73: 'livro', 74: 'relógio', 75: 'vaso', 76: 'tesoura',
-                77: 'ursinho de pelúcia', 78: 'secador de cabelo', 79: 'escova de dentes'}
-
 
 def start_yolo_monitoring(cam_name, video_url, object_ids_str, device, rearm_time, quantity, exact_number, sensitivity,
                           roi=None, receptor_url=None, receptor_port=None):
@@ -92,7 +79,7 @@ def start_yolo_monitoring(cam_name, video_url, object_ids_str, device, rearm_tim
         return
 
     try:
-        model = YOLO("yolo12n.pt")
+        model = YOLO("yolo12s.pt")
     except Exception as e:
         report_error(cam_name, f"Falha ao carregar modelo YOLO: {e}")
         return
@@ -284,7 +271,7 @@ if __name__ == "__main__":
     main_cam_name = "Desconhecida"
     try:
         args = parser.parse_args()
-        main_cam_name = args.anme
+        main_cam_name = args.name # Correção aqui!
 
         video_source = int(args.url) if args.url.isdigit() else args.url
         args.url = video_source
