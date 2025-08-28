@@ -5,22 +5,7 @@ from PySide6.QtWidgets import (QApplication, QLabel, QDialog, QVBoxLayout, QHBox
                                QFormLayout, QGroupBox, QStackedWidget, QSizePolicy)
 from PySide6.QtCore import QTimer, Qt, QPoint, QRect, Signal, QSize
 from PySide6.QtGui import QImage, QPixmap, QPainter, QPen, QColor, QCursor, QPolygon
-
-# (O dicionário YOLO_CLASSES permanece o mesmo)
-YOLO_CLASSES = {0: 'pessoa', 1: 'bicicleta', 2: 'carro', 3: 'motocicleta', 4: 'avião', 5: 'ônibus', 6: 'trem',
-                7: 'caminhão', 8: 'barco', 9: 'semáforo', 10: 'hidrante', 11: 'placa de pare', 12: 'parquímetro',
-                13: 'banco', 14: 'pássaro', 15: 'gato', 16: 'cão', 17: 'cavalo', 18: 'ovelha', 19: 'vaca',
-                20: 'elefante', 21: 'urso', 22: 'zebra', 23: 'girafa', 24: 'mochila', 25: 'guarda-chuva', 26: 'bolsa',
-                27: 'gravata', 28: 'mala', 29: 'frisbee', 30: 'esquis', 31: 'snowboard', 32: 'bola esportiva',
-                33: 'pipa', 34: 'taco de beisebol', 35: 'luva de beisebol', 36: 'skate', 37: 'prancha de surfe',
-                38: 'raquete de tênis', 39: 'garrafa', 40: 'taça de vinho', 41: 'copo', 42: 'garfo', 43: 'faca',
-                44: 'colher', 45: 'tigela', 46: 'banana', 47: 'maçã', 48: 'sanduíche', 49: 'laranja', 50: 'brócolis',
-                51: 'cenoura', 52: 'cachorro-quente', 53: 'pizza', 54: 'donut', 55: 'bolo', 56: 'cadeira', 57: 'sofá',
-                58: 'vaso de planta', 59: 'cama', 60: 'mesa de jantar', 61: 'vaso sanitário', 62: 'tv', 63: 'laptop',
-                64: 'mouse', 65: 'controle remoto', 66: 'teclado', 67: 'celular', 68: 'micro-ondas', 69: 'forno',
-                70: 'torradeira', 71: 'pia', 72: 'geladeira', 73: 'livro', 74: 'relógio', 75: 'vaso', 76: 'tesoura',
-                77: 'ursinho de pelúcia', 78: 'secador de cabelo', 79: 'escova de dentes'}
-
+from constants import YOLO_CLASSES
 
 class LiveViewDialog(QDialog):
     def __init__(self, cam_config, parent=None):
