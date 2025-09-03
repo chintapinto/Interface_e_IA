@@ -1,0 +1,775 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Bridge Câmera → Digifort com Interface Gráfica
+Permite configurar eventos específicos para cada câmera
+"""
+
+import tkinter as tk
+from tkinter import ttk, messagebox, scrolledtext
+import json
+import threading
+import logging
+import datetime
+import requests
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.parse import urlparse, parse_qs
+import os
+import sys
+
+# Configuração de logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('camera_bridge.log'),
+        logging.StreamHandler()
+    ]
+)
+
+class CameraDigifortBridge(BaseHTTPRequestHandler):
+    # Configuração padrão do Digifort
+    digifort_config = {
+        'host': '192.168.1.110',
+        'port': 8601,
+        'username': 'admin',
+        'password': 'gitel1987',
+        'timeout': 10
+    }
+    
+    # Configurações das câmeras (será carregado do arquivo)
+    camera_configs = {}
+    
+    # Status do servidor
+    server_status = {'running': False, 'stats': {'total_events': 0, 'successful': 0, 'failed': 0}}
+    
+    # Callback para atualizar GUI
+    gui_callback = None
+    
+    @classmethod
+    def set_gui_callback(cls, callback):
+        cls.gui_callback = callback
+    
+    @classmethod
+    def update_digifort_config(cls, config):
+        cls.digifort_config.update(config)
+    
+    @classmethod
+    def update_camera_configs(cls, configs):
+        cls.camera_configs = configs
+    
+    def log_message(self, format, *args):
+        """Override para usar nosso sistema de logging"""
+        message = f"{self.address_string()} - {format % args}"
+        logging.info(message)
+        if self.gui_callback:
+            self.gui_callback('log', message)
+    
+    def send_to_digifort(self, event_name, camera_ip):
+        """Envia evento para o Digifort"""
+        try:
+            digifort_url = f"http://{self.digifort_config['host']}:{self.digifort_config['port']}/Interface/GlobalEvents/TriggerGlobalEvent"
+            
+            params = {
+                'Event': event_name,
+                'Source': f'Camera_{camera_ip.replace(".", "_")}',
+                'Timestamp': datetime.datetime.now().isoformat()
+            }
+            
+            auth = (self.digifort_config['username'], self.digifort_config['password'])
+            headers = {
+                'User-Agent': 'CameraBridge/2.0',
+                'Content-Type': 'application/x-www-form-urlencoded'
+            }
+            
+            logging.info(f"📡 Enviando para Digifort: {event_name} (Camera: {camera_ip})")
+            
+            response = requests.get(
+                digifort_url,
+                params=params,
+                auth=auth,
+                headers=headers,
+                timeout=self.digifort_config['timeout']
+            )
+            
+            if response.status_code == 200:
+                logging.info(f"✅ Sucesso no Digifort! Status: {response.status_code}")
+                self.server_status['stats']['successful'] += 1
+                return True, response.text
+            else:
+                logging.error(f"❌ Erro no Digifort! Status: {response.status_code}")
+                self.server_status['stats']['failed'] += 1
+                return False, f"HTTP {response.status_code}: {response.text}"
+                
+        except requests.exceptions.Timeout:
+            error_msg = f"⏰ Timeout ao conectar com Digifort ({self.digifort_config['timeout']}s)"
+            logging.error(error_msg)
+            self.server_status['stats']['failed'] += 1
+            return False, error_msg
+        except requests.exceptions.ConnectionError:
+            error_msg = f"🔌 Erro de conexão com Digifort {self.digifort_config['host']}:{self.digifort_config['port']}"
+            logging.error(error_msg)
+            self.server_status['stats']['failed'] += 1
+            return False, error_msg
+        except Exception as e:
+            error_msg = f"💥 Erro inesperado: {str(e)}"
+            logging.error(error_msg)
+            self.server_status['stats']['failed'] += 1
+            return False, error_msg
+    
+    def process_camera_event(self, path, query_params):
+        """Processa evento da câmera"""
+        client_ip = self.client_address[0]
+        timestamp = datetime.datetime.now().isoformat()
+        
+        # Incrementar contador de eventos
+        self.server_status['stats']['total_events'] += 1
+        
+        # Verificar se a câmera está configurada
+        if client_ip not in self.camera_configs:
+            error_msg = f"❌ Câmera {client_ip} não configurada"
+            logging.error(error_msg)
+            if self.gui_callback:
+                self.gui_callback('event', {
+                    'timestamp': timestamp,
+                    'camera_ip': client_ip,
+                    'status': 'error',
+                    'message': 'Câmera não configurada'
+                })
+            return {'success': False, 'error': 'Câmera não configurada'}
+        
+        camera_config = self.camera_configs[client_ip]
+        
+        # Extrair tipo de evento
+        event_type = None
+        for param in ['event', 'type', 'action']:
+            if param in query_params and query_params[param]:
+                event_type = query_params[param][0].lower()
+                break
+        
+        if not event_type:
+            event_type = 'unknown'
+        
+        # Determinar nome do evento para o Digifort
+        digifort_event = None
+        
+        # Verificar mapeamentos específicos da câmera
+        if event_type in camera_config.get('event_mapping', {}):
+            digifort_event = camera_config['event_mapping'][event_type]
+        else:
+            # Usar evento padrão se não houver mapeamento específico
+            digifort_event = camera_config.get('default_event', f"CAMERA_{client_ip.replace('.', '_')}_ALARM")
+        
+        logging.info(f"🎥 Evento da câmera {client_ip} ({camera_config.get('name', 'Sem nome')})")
+        logging.info(f"📄 Mapeamento: '{event_type}' → '{digifort_event}'")
+        
+        # Enviar para Digifort
+        success, response = self.send_to_digifort(digifort_event, client_ip)
+        
+        # Atualizar GUI
+        if self.gui_callback:
+            self.gui_callback('event', {
+                'timestamp': timestamp,
+                'camera_ip': client_ip,
+                'camera_name': camera_config.get('name', 'Sem nome'),
+                'original_event': event_type,
+                'digifort_event': digifort_event,
+                'status': 'success' if success else 'error',
+                'message': 'Enviado com sucesso' if success else str(response)
+            })
+            
+            # Atualizar estatísticas
+            self.gui_callback('stats', self.server_status['stats'])
+        
+        return {
+            'success': success,
+            'digifort_event': digifort_event,
+            'camera_name': camera_config.get('name', 'Sem nome')
+        }
+    
+    def is_camera_allowed(self):
+        """Verifica se a câmera está configurada"""
+        client_ip = self.client_address[0]
+        return client_ip in self.camera_configs
+    
+    def send_json_response(self, data, status_code=200):
+        """Envia resposta JSON"""
+        self.send_response(status_code)
+        self.send_header('Content-type', 'application/json; charset=utf-8')
+        self.end_headers()
+        response = json.dumps(data, ensure_ascii=False, indent=2)
+        self.wfile.write(response.encode('utf-8'))
+    
+    def do_GET(self):
+        """Manipula requisições GET"""
+        if not self.is_camera_allowed():
+            client_ip = self.client_address[0]
+            logging.warning(f"⚠️ Acesso negado para IP não autorizado: {client_ip}")
+            self.send_json_response({
+                'status': 'error',
+                'message': f'IP {client_ip} não configurado'
+            }, 403)
+            return
+        
+        parsed_url = urlparse(self.path)
+        query_params = parse_qs(parsed_url.query)
+        
+        result = self.process_camera_event(parsed_url.path, query_params)
+        
+        if result['success']:
+            self.send_json_response({
+                'status': 'success',
+                'message': 'Evento processado com sucesso',
+                'digifort_event': result['digifort_event'],
+                'camera_name': result['camera_name']
+            })
+        else:
+            self.send_json_response({
+                'status': 'error',
+                'message': result.get('error', 'Erro ao processar evento')
+            }, 500)
+    
+    def do_POST(self):
+        """Manipula requisições POST"""
+        self.do_GET()  # Mesmo tratamento
+
+class CameraBridgeGUI:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Bridge Câmera → Digifort")
+        self.root.geometry("1000x700")
+        
+        # Dados
+        self.camera_configs = {}
+        self.digifort_config = CameraDigifortBridge.digifort_config.copy()
+        self.server = None
+        self.server_thread = None
+        
+        # Configurar callback
+        CameraDigifortBridge.set_gui_callback(self.gui_callback)
+        
+        # Carregar configurações
+        self.load_config()
+        
+        # Criar interface
+        self.create_gui()
+        
+        # Atualizar interface
+        self.update_camera_list()
+        self.update_digifort_config_display()
+    
+    def create_gui(self):
+        """Cria a interface gráfica"""
+        # Notebook para abas
+        notebook = ttk.Notebook(self.root)
+        notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Aba 1: Configuração das Câmeras
+        camera_frame = ttk.Frame(notebook)
+        notebook.add(camera_frame, text="🎥 Câmeras")
+        
+        # Configuração das câmeras
+        config_frame = ttk.LabelFrame(camera_frame, text="Configuração de Câmeras")
+        config_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        
+        # Formulário para adicionar câmera
+        form_frame = ttk.Frame(config_frame)
+        form_frame.pack(fill=tk.X, padx=10, pady=10)
+        
+        ttk.Label(form_frame, text="IP da Câmera:").grid(row=0, column=0, sticky=tk.W, padx=(0, 10))
+        self.ip_entry = ttk.Entry(form_frame, width=20)
+        self.ip_entry.grid(row=0, column=1, padx=(0, 20))
+        
+        ttk.Label(form_frame, text="Nome da Câmera:").grid(row=0, column=2, sticky=tk.W, padx=(0, 10))
+        self.name_entry = ttk.Entry(form_frame, width=25)
+        self.name_entry.grid(row=0, column=3, padx=(0, 20))
+        
+        ttk.Label(form_frame, text="Evento Padrão:").grid(row=1, column=0, sticky=tk.W, padx=(0, 10), pady=(10, 0))
+        self.default_event_entry = ttk.Entry(form_frame, width=30)
+        self.default_event_entry.grid(row=1, column=1, columnspan=2, sticky=tk.W, pady=(10, 0))
+        
+        ttk.Button(form_frame, text="Adicionar Câmera", command=self.add_camera).grid(row=1, column=3, pady=(10, 0))
+        
+        # Lista de câmeras
+        list_frame = ttk.Frame(config_frame)
+        list_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Treeview para câmeras
+        columns = ('IP', 'Nome', 'Evento Padrão', 'Mapeamentos')
+        self.camera_tree = ttk.Treeview(list_frame, columns=columns, show='headings', height=8)
+        
+        for col in columns:
+            self.camera_tree.heading(col, text=col)
+            self.camera_tree.column(col, width=150)
+        
+        scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.camera_tree.yview)
+        self.camera_tree.configure(yscrollcommand=scrollbar.set)
+        
+        self.camera_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Botões de ação
+        button_frame = ttk.Frame(config_frame)
+        button_frame.pack(fill=tk.X, padx=10, pady=5)
+        
+        ttk.Button(button_frame, text="Editar Câmera", command=self.edit_camera).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(button_frame, text="Remover Câmera", command=self.remove_camera).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(button_frame, text="Configurar Mapeamentos", command=self.configure_mappings).pack(side=tk.LEFT, padx=(0, 5))
+        
+        # Aba 2: Configuração do Digifort
+        digifort_frame = ttk.Frame(notebook)
+        notebook.add(digifort_frame, text="🎯 Digifort")
+        
+        digifort_config_frame = ttk.LabelFrame(digifort_frame, text="Configuração do Digifort")
+        digifort_config_frame.pack(fill=tk.X, padx=10, pady=10)
+        
+        # Formulário Digifort
+        df_form = ttk.Frame(digifort_config_frame)
+        df_form.pack(padx=10, pady=10)
+        
+        ttk.Label(df_form, text="Host:").grid(row=0, column=0, sticky=tk.W, padx=(0, 10))
+        self.df_host_entry = ttk.Entry(df_form, width=20)
+        self.df_host_entry.grid(row=0, column=1, padx=(0, 20))
+        self.df_host_entry.insert(0, self.digifort_config['host'])
+        
+        ttk.Label(df_form, text="Porta:").grid(row=0, column=2, sticky=tk.W, padx=(0, 10))
+        self.df_port_entry = ttk.Entry(df_form, width=10)
+        self.df_port_entry.grid(row=0, column=3)
+        self.df_port_entry.insert(0, str(self.digifort_config['port']))
+        
+        ttk.Label(df_form, text="Usuário:").grid(row=1, column=0, sticky=tk.W, padx=(0, 10), pady=(10, 0))
+        self.df_user_entry = ttk.Entry(df_form, width=20)
+        self.df_user_entry.grid(row=1, column=1, padx=(0, 20), pady=(10, 0))
+        self.df_user_entry.insert(0, self.digifort_config['username'])
+        
+        ttk.Label(df_form, text="Senha:").grid(row=1, column=2, sticky=tk.W, padx=(0, 10), pady=(10, 0))
+        self.df_pass_entry = ttk.Entry(df_form, width=20, show="*")
+        self.df_pass_entry.grid(row=1, column=3, pady=(10, 0))
+        self.df_pass_entry.insert(0, self.digifort_config['password'])
+        
+        button_df_frame = ttk.Frame(digifort_config_frame)
+        button_df_frame.pack(pady=10)
+        
+        ttk.Button(button_df_frame, text="Salvar Configuração", command=self.save_digifort_config).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Button(button_df_frame, text="Testar Conexão", command=self.test_digifort_connection).pack(side=tk.LEFT)
+        
+        # Aba 3: Monitor de Eventos
+        monitor_frame = ttk.Frame(notebook)
+        notebook.add(monitor_frame, text="📊 Monitor")
+        
+        # Status do servidor
+        status_frame = ttk.LabelFrame(monitor_frame, text="Status do Servidor")
+        status_frame.pack(fill=tk.X, padx=10, pady=10)
+        
+        status_info = ttk.Frame(status_frame)
+        status_info.pack(padx=10, pady=10)
+        
+        self.status_label = ttk.Label(status_info, text="🔴 Parado", font=('Arial', 12, 'bold'))
+        self.status_label.pack(anchor=tk.W)
+        
+        self.stats_label = ttk.Label(status_info, text="Eventos: 0 | Sucessos: 0 | Falhas: 0")
+        self.stats_label.pack(anchor=tk.W)
+        
+        # Botões de controle
+        control_frame = ttk.Frame(status_frame)
+        control_frame.pack(pady=10)
+        
+        self.start_button = ttk.Button(control_frame, text="🚀 Iniciar Servidor", command=self.start_server)
+        self.start_button.pack(side=tk.LEFT, padx=(0, 10))
+        
+        self.stop_button = ttk.Button(control_frame, text="🛑 Parar Servidor", command=self.stop_server, state=tk.DISABLED)
+        self.stop_button.pack(side=tk.LEFT)
+        
+        # Log de eventos
+        log_frame = ttk.LabelFrame(monitor_frame, text="Log de Eventos")
+        log_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        self.event_log = scrolledtext.ScrolledText(log_frame, height=15)
+        self.event_log.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Configurar tags de cores
+        self.event_log.tag_config('success', foreground='green')
+        self.event_log.tag_config('error', foreground='red')
+        self.event_log.tag_config('info', foreground='blue')
+    
+    def gui_callback(self, event_type, data):
+        """Callback para atualizar a GUI a partir do servidor"""
+        def update_gui():
+            if event_type == 'log':
+                timestamp = datetime.datetime.now().strftime('%H:%M:%S')
+                self.event_log.insert(tk.END, f"[{timestamp}] {data}\n")
+                self.event_log.see(tk.END)
+            
+            elif event_type == 'event':
+                timestamp = data['timestamp'][:19].replace('T', ' ')
+                status_color = 'success' if data['status'] == 'success' else 'error'
+                
+                message = f"[{timestamp}] {data['camera_name']} ({data['camera_ip']}) - "
+                message += f"{data['original_event']} → {data['digifort_event']} - {data['message']}\n"
+                
+                self.event_log.insert(tk.END, message, status_color)
+                self.event_log.see(tk.END)
+            
+            elif event_type == 'stats':
+                stats_text = f"Eventos: {data['total_events']} | Sucessos: {data['successful']} | Falhas: {data['failed']}"
+                self.stats_label.config(text=stats_text)
+        
+        # Executar na thread principal
+        self.root.after(0, update_gui)
+    
+    def add_camera(self):
+        """Adiciona nova câmera"""
+        ip = self.ip_entry.get().strip()
+        name = self.name_entry.get().strip()
+        default_event = self.default_event_entry.get().strip()
+        
+        if not ip or not name:
+            messagebox.showerror("Erro", "IP e Nome são obrigatórios!")
+            return
+        
+        if ip in self.camera_configs:
+            messagebox.showerror("Erro", "Essa câmera já está configurada!")
+            return
+        
+        self.camera_configs[ip] = {
+            'name': name,
+            'default_event': default_event or f"CAMERA_{ip.replace('.', '_')}_ALARM",
+            'event_mapping': {}
+        }
+        
+        # Limpar formulário
+        self.ip_entry.delete(0, tk.END)
+        self.name_entry.delete(0, tk.END)
+        self.default_event_entry.delete(0, tk.END)
+        
+        self.update_camera_list()
+        self.save_config()
+        messagebox.showinfo("Sucesso", "Câmera adicionada com sucesso!")
+    
+    def edit_camera(self):
+        """Edita câmera selecionada"""
+        selection = self.camera_tree.selection()
+        if not selection:
+            messagebox.showwarning("Aviso", "Selecione uma câmera para editar!")
+            return
+        
+        item = self.camera_tree.item(selection[0])
+        ip = item['values'][0]
+        
+        # Janela de edição
+        edit_window = tk.Toplevel(self.root)
+        edit_window.title(f"Editar Câmera {ip}")
+        edit_window.geometry("400x200")
+        
+        ttk.Label(edit_window, text="Nome:").pack(pady=5)
+        name_entry = ttk.Entry(edit_window, width=40)
+        name_entry.pack(pady=5)
+        name_entry.insert(0, self.camera_configs[ip]['name'])
+        
+        ttk.Label(edit_window, text="Evento Padrão:").pack(pady=5)
+        event_entry = ttk.Entry(edit_window, width=40)
+        event_entry.pack(pady=5)
+        event_entry.insert(0, self.camera_configs[ip]['default_event'])
+        
+        def save_changes():
+            self.camera_configs[ip]['name'] = name_entry.get()
+            self.camera_configs[ip]['default_event'] = event_entry.get()
+            self.update_camera_list()
+            self.save_config()
+            edit_window.destroy()
+            messagebox.showinfo("Sucesso", "Câmera atualizada!")
+        
+        ttk.Button(edit_window, text="Salvar", command=save_changes).pack(pady=10)
+    
+    def remove_camera(self):
+        """Remove câmera selecionada"""
+        selection = self.camera_tree.selection()
+        if not selection:
+            messagebox.showwarning("Aviso", "Selecione uma câmera para remover!")
+            return
+        
+        item = self.camera_tree.item(selection[0])
+        ip = item['values'][0]
+        
+        if messagebox.askyesno("Confirmar", f"Remover câmera {ip}?"):
+            del self.camera_configs[ip]
+            self.update_camera_list()
+            self.save_config()
+            messagebox.showinfo("Sucesso", "Câmera removida!")
+    
+    def configure_mappings(self):
+        """Configura mapeamentos de eventos da câmera"""
+        selection = self.camera_tree.selection()
+        if not selection:
+            messagebox.showwarning("Aviso", "Selecione uma câmera para configurar!")
+            return
+        
+        item = self.camera_tree.item(selection[0])
+        ip = item['values'][0]
+        camera = self.camera_configs[ip]
+        
+        # Janela de mapeamentos
+        map_window = tk.Toplevel(self.root)
+        map_window.title(f"Mapeamentos - {camera['name']} ({ip})")
+        map_window.geometry("600x400")
+        
+        ttk.Label(map_window, text="Mapeamento de Eventos:", font=('Arial', 12, 'bold')).pack(pady=10)
+        ttk.Label(map_window, text="Evento da Câmera → Evento do Digifort").pack()
+        
+        # Frame para mapeamentos
+        map_frame = ttk.Frame(map_window)
+        map_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+        
+        # Lista de mapeamentos
+        map_tree = ttk.Treeview(map_frame, columns=('Câmera', 'Digifort'), show='headings', height=10)
+        map_tree.heading('Câmera', text='Evento da Câmera')
+        map_tree.heading('Digifort', text='Evento do Digifort')
+        map_tree.column('Câmera', width=200)
+        map_tree.column('Digifort', width=250)
+        map_tree.pack(fill=tk.BOTH, expand=True)
+        
+        # Carregar mapeamentos existentes
+        def load_mappings():
+            for item in map_tree.get_children():
+                map_tree.delete(item)
+            for cam_event, dig_event in camera['event_mapping'].items():
+                map_tree.insert('', tk.END, values=(cam_event, dig_event))
+        
+        load_mappings()
+        
+        # Formulário para adicionar mapeamento
+        add_frame = ttk.Frame(map_window)
+        add_frame.pack(fill=tk.X, padx=20, pady=10)
+        
+        ttk.Label(add_frame, text="Evento Câmera:").grid(row=0, column=0, padx=(0, 10))
+        cam_event_entry = ttk.Entry(add_frame, width=20)
+        cam_event_entry.grid(row=0, column=1, padx=(0, 20))
+        
+        ttk.Label(add_frame, text="Evento Digifort:").grid(row=0, column=2, padx=(0, 10))
+        dig_event_entry = ttk.Entry(add_frame, width=30)
+        dig_event_entry.grid(row=0, column=3, padx=(0, 20))
+        
+        def add_mapping():
+            cam_event = cam_event_entry.get().strip().lower()
+            dig_event = dig_event_entry.get().strip()
+            
+            if cam_event and dig_event:
+                camera['event_mapping'][cam_event] = dig_event
+                cam_event_entry.delete(0, tk.END)
+                dig_event_entry.delete(0, tk.END)
+                load_mappings()
+        
+        def remove_mapping():
+            selection = map_tree.selection()
+            if selection:
+                item = map_tree.item(selection[0])
+                cam_event = item['values'][0]
+                if cam_event in camera['event_mapping']:
+                    del camera['event_mapping'][cam_event]
+                    load_mappings()
+        
+        ttk.Button(add_frame, text="Adicionar", command=add_mapping).grid(row=0, column=4)
+        
+        button_frame = ttk.Frame(map_window)
+        button_frame.pack(pady=10)
+        
+        ttk.Button(button_frame, text="Remover Selecionado", command=remove_mapping).pack(side=tk.LEFT, padx=(0, 10))
+        
+        def save_mappings():
+            self.update_camera_list()
+            self.save_config()
+            map_window.destroy()
+            messagebox.showinfo("Sucesso", "Mapeamentos salvos!")
+        
+        ttk.Button(button_frame, text="Salvar e Fechar", command=save_mappings).pack(side=tk.LEFT)
+    
+    def update_camera_list(self):
+        """Atualiza lista de câmeras"""
+        for item in self.camera_tree.get_children():
+            self.camera_tree.delete(item)
+        
+        for ip, config in self.camera_configs.items():
+            mappings_count = len(config.get('event_mapping', {}))
+            mappings_text = f"{mappings_count} mapeamento(s)"
+            
+            self.camera_tree.insert('', tk.END, values=(
+                ip,
+                config['name'],
+                config['default_event'],
+                mappings_text
+            ))
+    
+    def save_digifort_config(self):
+        """Salva configuração do Digifort"""
+        try:
+            self.digifort_config = {
+                'host': self.df_host_entry.get(),
+                'port': int(self.df_port_entry.get()),
+                'username': self.df_user_entry.get(),
+                'password': self.df_pass_entry.get(),
+                'timeout': 10
+            }
+            
+            CameraDigifortBridge.update_digifort_config(self.digifort_config)
+            self.save_config()
+            messagebox.showinfo("Sucesso", "Configuração do Digifort salva!")
+            
+        except ValueError:
+            messagebox.showerror("Erro", "Porta deve ser um número!")
+    
+    def update_digifort_config_display(self):
+        """Atualiza display da configuração do Digifort"""
+        self.df_host_entry.delete(0, tk.END)
+        self.df_host_entry.insert(0, self.digifort_config['host'])
+        
+        self.df_port_entry.delete(0, tk.END)
+        self.df_port_entry.insert(0, str(self.digifort_config['port']))
+        
+        self.df_user_entry.delete(0, tk.END)
+        self.df_user_entry.insert(0, self.digifort_config['username'])
+        
+        self.df_pass_entry.delete(0, tk.END)
+        self.df_pass_entry.insert(0, self.digifort_config['password'])
+    
+    def test_digifort_connection(self):
+        """Testa conexão com Digifort"""
+        try:
+            url = f"http://{self.digifort_config['host']}:{self.digifort_config['port']}/Interface/GlobalEvents/TriggerGlobalEvent"
+            auth = (self.digifort_config['username'], self.digifort_config['password'])
+            params = {'Event': 'BRIDGE_TEST'}
+            
+            response = requests.get(url, params=params, auth=auth, timeout=5)
+            
+            if response.status_code == 200:
+                messagebox.showinfo("Sucesso", "✅ Conexão com Digifort OK!")
+            else:
+                messagebox.showerror("Erro", f"❌ Digifort retornou status: {response.status_code}")
+                
+        except requests.exceptions.Timeout:
+            messagebox.showerror("Erro", "⏰ Timeout - Verifique o IP e porta")
+        except requests.exceptions.ConnectionError:
+            messagebox.showerror("Erro", "🔌 Erro de conexão - Verifique se o Digifort está rodando")
+        except Exception as e:
+            messagebox.showerror("Erro", f"💥 Erro: {str(e)}")
+    
+    def start_server(self):
+        """Inicia servidor bridge"""
+        if not self.camera_configs:
+            messagebox.showwarning("Aviso", "Configure pelo menos uma câmera antes de iniciar!")
+            return
+        
+        try:
+            # Atualizar configurações no servidor
+            CameraDigifortBridge.update_camera_configs(self.camera_configs)
+            CameraDigifortBridge.update_digifort_config(self.digifort_config)
+            
+            # Iniciar servidor
+            host = self.digifort_config['host']  # Mesmo IP do Digifort
+            port = 8080  # Porta do bridge
+            
+            self.server = HTTPServer((host, port), CameraDigifortBridge)
+            CameraDigifortBridge.server_status['running'] = True
+            
+            # Iniciar em thread separada
+            self.server_thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+            self.server_thread.start()
+            
+            # Atualizar interface
+            self.status_label.config(text=f"🟢 Rodando em {host}:{port}", foreground='green')
+            self.start_button.config(state=tk.DISABLED)
+            self.stop_button.config(state=tk.NORMAL)
+            
+            # Log inicial
+            self.event_log.insert(tk.END, f"🚀 Servidor iniciado em {host}:{port}\n", 'info')
+            self.event_log.insert(tk.END, f"📹 Câmeras configuradas: {len(self.camera_configs)}\n", 'info')
+            
+            for ip, config in self.camera_configs.items():
+                self.event_log.insert(tk.END, f"   • {config['name']} ({ip}) → {config['default_event']}\n", 'info')
+            
+            self.event_log.insert(tk.END, f"🎯 Digifort: {self.digifort_config['host']}:{self.digifort_config['port']}\n", 'info')
+            self.event_log.insert(tk.END, "📡 Configure suas câmeras para enviarem eventos para:\n", 'info')
+            self.event_log.insert(tk.END, f"   http://{host}:{port}/cgi-bin/alarm.cgi?event=start\n", 'info')
+            self.event_log.insert(tk.END, f"   http://{host}:{port}/cgi-bin/alarm.cgi?event=end\n", 'info')
+            self.event_log.see(tk.END)
+            
+            messagebox.showinfo("Sucesso", f"Servidor iniciado com sucesso!\n\nConfiguração das câmeras:\nhttp://{host}:{port}/cgi-bin/alarm.cgi?event=start")
+            
+        except OSError as e:
+            messagebox.showerror("Erro", f"Erro ao iniciar servidor: {e}\nVerifique se a porta não está em uso.")
+        except Exception as e:
+            messagebox.showerror("Erro", f"Erro inesperado: {e}")
+    
+    def stop_server(self):
+        """Para servidor bridge"""
+        if self.server:
+            try:
+                self.server.shutdown()
+                self.server.server_close()
+                self.server = None
+                
+                CameraDigifortBridge.server_status['running'] = False
+                
+                # Atualizar interface
+                self.status_label.config(text="🔴 Parado", foreground='red')
+                self.start_button.config(state=tk.NORMAL)
+                self.stop_button.config(state=tk.DISABLED)
+                
+                self.event_log.insert(tk.END, "🛑 Servidor parado\n", 'info')
+                self.event_log.see(tk.END)
+                
+                messagebox.showinfo("Sucesso", "Servidor parado com sucesso!")
+                
+            except Exception as e:
+                messagebox.showerror("Erro", f"Erro ao parar servidor: {e}")
+    
+    def save_config(self):
+        """Salva configurações em arquivo"""
+        config = {
+            'digifort_config': self.digifort_config,
+            'camera_configs': self.camera_configs
+        }
+        
+        try:
+            with open('bridge_config.json', 'w', encoding='utf-8') as f:
+                json.dump(config, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            messagebox.showerror("Erro", f"Erro ao salvar configuração: {e}")
+    
+    def load_config(self):
+        """Carrega configurações do arquivo"""
+        try:
+            if os.path.exists('bridge_config.json'):
+                with open('bridge_config.json', 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                
+                if 'digifort_config' in config:
+                    self.digifort_config.update(config['digifort_config'])
+                
+                if 'camera_configs' in config:
+                    self.camera_configs = config['camera_configs']
+                    
+        except Exception as e:
+            messagebox.showerror("Erro", f"Erro ao carregar configuração: {e}")
+
+def main():
+    """Função principal"""
+    root = tk.Tk()
+    app = CameraBridgeGUI(root)
+    
+    def on_closing():
+        if app.server:
+            app.stop_server()
+        root.destroy()
+    
+    root.protocol("WM_DELETE_WINDOW", on_closing)
+    
+    # Tentar definir ícone (opcional)
+    try:
+        root.iconbitmap('bridge.ico')
+    except:
+        pass
+    
+    root.mainloop()
+
+if __name__ == '__main__':
+    main()
